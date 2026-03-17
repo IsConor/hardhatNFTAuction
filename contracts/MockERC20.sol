@@ -4,10 +4,12 @@ import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 contract MockERC20 is ERC20 {
     address owner;
+    uint8 private _decimals;
 
-    constructor() ERC20("USD Coin", "USDC"){
+    constructor(uint8 decimals_) ERC20("USD Coin", "USDC"){
         owner = msg.sender;
         _mint(msg.sender, 1000);
+        _setupDecimals(decimals_);
     }
 
     function mint(address to, uint256 amount) public onlyOwner{
@@ -16,6 +18,13 @@ contract MockERC20 is ERC20 {
 
     function burn(address to, uint256 amount) public onlyOwner {
         _burn(to, amount);
+    }
+
+    function _setupDecimals(uint8 decimals_) internal {
+        _decimals = decimals_;
+    }
+    function decimals() public view override returns (uint8) {
+        return _decimals;
     }
 
     modifier onlyOwner{

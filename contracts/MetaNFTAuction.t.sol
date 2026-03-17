@@ -54,7 +54,7 @@ contract MetaNFTTest is Test {
 
         // 部署ERC20合约
         vm.prank(usdc_owner);
-        USDC_SEPOLIA = new MockERC20();
+        USDC_SEPOLIA = new MockERC20(6);
      
     }
 
@@ -178,8 +178,11 @@ contract MetaNFTTest is Test {
  
     // 测试修改支付方式
     function test_changeBidMethod() public {
+        // ERC20 的合约地址
         MockERC20 usdc = USDC_SEPOLIA;
+        // 卖家地址
         address seller = address(0xB0B);
+        // 竞拍者地址
         address bidder = address(0xB0C);
 
         vm.prank(owner);
@@ -216,6 +219,193 @@ contract MetaNFTTest is Test {
         vm.expectRevert("invalid method");
         // bidder 再次竞拍 出 20 个 ERC20代币
         auction.bid(currentAuctionId, 20);
+    }
 
+    // 测试低于上一次最高价
+    function test_bidLowerThanHighestBid() public {
+        // ERC20 的合约地址
+        MockERC20 usdc = USDC_SEPOLIA;
+        // 卖家地址
+        address seller = address(0xB0B);
+        // 竞拍者地址
+        address bidder1 = address(0xB0C);
+        address bidder2 = address(0xB0D);
+
+        // 竞拍者储蓄10 ether
+        vm.deal(bidder1, 10 ether);
+        vm.deal(bidder2, 10 ether);
+
+        // NFT合约owner 给卖家铸造NFT
+        vm.prank(owner);
+        nft.mint(seller);
+        // 卖家授权拍卖合约使用tokenId为1的NFT
+        vm.prank(seller);
+        nft.approve(address(auction), 1);
+        // 设置起拍价为8美元
+        uint256 startingPriceInDollar = 8;
+
+
+        // admin 创建拍卖
+        vm.startPrank(admin);
+        auction.startBid(seller, address(nft), 1, 30, address(usdc), startingPriceInDollar);
+        vm.stopPrank();
+
+        // 当前创建的拍卖 auctionId
+        uint256 currentAuctionId = auction.auctionId() - 1;
+
+        // 竞拍开始
+        // bidder1 出价 3ETH
+        vm.prank(bidder1);
+        auction.bid{value:3 ether}(currentAuctionId, 0);
+
+        // 断言revert信息为：
+        vm.expectRevert("Your bid must be higher than the current highest bid");
+
+        // bidder2 出价 2ETH
+        vm.prank(bidder2);
+        auction.bid{value:2 ether}(currentAuctionId, 0);
+    }
+
+    // 测试拍卖结果正确
+    function test_bidResult() public {
+        // ERC20 的合约地址
+        MockERC20 usdc = USDC_SEPOLIA;
+        // 卖家地址
+        address seller = address(0xB0B);
+        // 竞拍者地址
+        address bidder1 = address(0xB0C);
+        address bidder2 = address(0xB0D);
+
+        // 竞拍者储蓄10 ether
+        vm.deal(bidder1, 10 ether);
+        vm.deal(bidder2, 10 ether);
+
+        // NFT合约owner 给卖家铸造NFT
+        vm.prank(owner);
+        nft.mint(seller);
+        // 卖家授权拍卖合约使用tokenId为1的NFT
+        vm.prank(seller);
+        nft.approve(address(auction), 1);
+        // 设置起拍价为8美元
+        uint256 startingPriceInDollar = 8;
+
+
+        // admin 创建拍卖
+        vm.startPrank(admin);
+        auction.startBid(seller, address(nft), 1, 30, address(usdc), startingPriceInDollar);
+        vm.stopPrank();
+        // 当前创建的拍卖 auctionId
+        uint256 currentAuctionId = auction.auctionId() - 1;
+
+        vm.prank(bidder1);
+        auction.bid{value: 2 ether}(currentAuctionId, 0);
+
+        vm.prank(bidder2);
+        auction.bid{value: 3 ether}(currentAuctionId, 0);
+
+        vm.prank(bidder1);
+        auction.bid{value: 4 ether}(currentAuctionId, 0);
+
+        (,,,,,,address highestBidder, uint256 highestBid,,,) = auction.auctions(currentAuctionId);
+
+        assertEq(highestBidder, bidder1);
+        assertEq(highestBid, 4 ether);
+        // 验证 bidder1 锁定在拍卖合约的ETH一共为6枚（一共出价两次：2ETH + 4ETH）
+        assertEq(bidder1.balance, 4 ether);
+
+        // 使拍卖自然截止
+        vm.warp(block.timestamp + 50);
+    
+        // admin调用拍卖成功函数结算
+        vm.prank(admin);
+        auction.bidFinally(currentAuctionId);
+
+        // 验证赢家bidder1 除了成交额4ETH 以外 锁定在合约中的2ETH是否退还
+        assertEq(bidder1.balance, 6 ether);
+        // 验证成交额 4ETH 是否转移给卖家 seller
+        assertEq(seller.balance, 4 ether);
+
+        // 验证赢家bidder1 是否 获得NFT
+        assertEq(nft.ownerOf(1), bidder1);
+        assertEq(nft.balanceOf(bidder1), 1);
+    }
+
+    // 竞价失败者测试提款正确
+    function test_withdraw() public {
+        MockERC20 usdc = USDC_SEPOLIA;
+        address seller = address(0xB0B);
+        address bidder1 = address(0xB0C);
+        address bidder2 = address(0xB0D);
+
+        // bidder1 竞拍者 存入 20枚 ETH
+        vm.deal(bidder1, 20 ether);
+        // usdc_owner 给 bidder2 竞拍者 铸造 1000 token
+
+        vm.prank(usdc_owner);
+        usdc.mint(bidder2, 1000 * 10**6);
+
+        // 授权给拍卖合约1000枚token
+        vm.prank(bidder2);
+        usdc.approve(address(auction), 1000 * 10**6);
+
+        // owner 给卖家 seller 铸造 NFT
+        vm.prank(owner);
+        nft.mint(seller);
+
+        // 卖家seller授权给拍卖合约 tokenId为1 的NFT
+        vm.prank(seller);
+        nft.approve(address(auction), 1);
+
+        // 设置起拍价为8美元
+        uint256 startingPriceInDollar = 8;
+
+        // admin 创建拍卖
+        vm.prank(admin);
+        auction.startBid(seller, address(nft), 1, 30, address(usdc), startingPriceInDollar);
+        uint256 currentAuctionId = auction.auctionId() - 1;
+
+
+        // 开始竞拍
+        // bidder1 出价2枚ETH锁定在拍卖合约
+        vm.prank(bidder1);
+        auction.bid{value: 2 ether}(currentAuctionId, 0);
+
+        // bidder2 出价15枚USDC锁定在拍卖合约
+        vm.prank(bidder2);
+        auction.bid(currentAuctionId, 15 * 10**6);
+
+        // bidder1 再次出价3枚ETH锁定在拍卖合约
+        vm.prank(bidder1);
+        auction.bid{value: 3 ether}(currentAuctionId, 0);
+
+        // bidder2 不屑 再次出价25枚USDC锁定在拍卖合约
+        vm.prank(bidder2);
+        auction.bid(currentAuctionId, 25 * 10**6);
+
+        // bidder1 撇了撇嘴 豪掷4枚ETH锁定在拍卖合约并赢得NFT
+        vm.prank(bidder1);
+        auction.bid{value: 4 ether}(currentAuctionId, 0);
+
+        // 使拍卖超过持续时间 自然结束
+        vm.warp(block.timestamp + 50);
+
+        // admin调用拍卖结算方法，结算卖家和买家资产
+        vm.prank(admin);
+        auction.bidFinally(currentAuctionId);
+
+        // 验证卖家seller获得4枚ETH
+        assertEq(seller.balance, 4 ether);
+
+        // 验证竞拍成功者 bidder1获得了NFT
+        assertEq(nft.ownerOf(1), bidder1);
+
+        // bidder2调用提款方法，取走竞拍过程中锁定的资产
+        vm.prank(bidder2);
+        auction.withdraw(currentAuctionId);
+
+        // 验证bidder2的余额回到了竞拍之前的初始值
+        assertEq(usdc.balanceOf(address(bidder2)), 1000 * 10**6);
+        // 验证赢家bidder1的余额为 20 - 4 = 16
+        assertEq(bidder1.balance, 16 ether);
     }
 }

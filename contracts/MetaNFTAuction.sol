@@ -10,8 +10,8 @@ import {AggregatorV3Interface} from "@chainlink/contracts/src/v0.8/shared/interf
 
 contract MetaNFTAuction is Initializable, IERC721Receiver{
     address private admin;
-     bool public isTestMode; // 测试模式开关：true=使用Mock，false=使用真实预言机
-     mapping(uint256 => address) public priceFeedAddresses; // 支付方式 => 预言机地址（1=ETH，2=USDC
+    bool public isTestMode; // 测试模式开关：true=使用Mock，false=使用真实预言机
+    mapping(uint256 => address) public priceFeedAddresses; // 支付方式 => 预言机地址（1=ETH，2=USDC
 
     struct Auction {
         address seller;                 // 卖家地址
@@ -69,8 +69,14 @@ contract MetaNFTAuction is Initializable, IERC721Receiver{
         _;
     }
 
+    // 创建拍卖事件
     event StartBid(uint256 auctionId);
+    // 竞拍事件
     event Bid(uint256 indexed auctionId, uint256 indexed amount, uint256 bidMethod);
+    // 竞拍失败者退款事件
+    event Withdraw(uint256 indexed auctionId, address indexed bidder, uint256 bal);
+    // 竞拍成功事件
+    event BidFinally(uint256 indexed auctionId, address indexed seller, address indexed bidder, uint256 bid);
 
     function onERC721Received(
         address,
@@ -148,6 +154,7 @@ contract MetaNFTAuction is Initializable, IERC721Receiver{
             } else {
                 // 这里检查 竞拍者 本次出价方式 = 之前的竞拍方式
                 require(bidMethod == 1, "invalid method");
+                bidAmount = msg.value;
             }
 
             // 调用预言机获取当前美元汇率（单价）
@@ -172,7 +179,11 @@ contract MetaNFTAuction is Initializable, IERC721Receiver{
                 bidMethods[_auctionId][msg.sender] = bidMethod;
             } else {
                 require(bidMethod == 2, "invalid method");
+                bidAmount = _erc20Amount;
             }
+
+            // 校验授权额度
+            require(allowance >= bidAmount, "ERC20 allowance insufficient");
 
             uint256 price = getPriceInDollar(bidMethod);
             uint256 tokenDecimals = IERC20Metadata(address(auction.paymentToken)).decimals();
@@ -201,11 +212,16 @@ contract MetaNFTAuction is Initializable, IERC721Receiver{
         auction.highestBidInDollar = bidPrice;
     }
 
+    
     // 拍卖已经结束, 管理员调用此方法结算 卖家和买家的交易
     // 竞拍成功者：退还：（竞拍过程中锁定在合约中的钱 - 竞拍价格）并获得NFT
     // 竞拍失败者：退还所有竞拍过程中锁定在合约中的钱
-    function bidFinally(uint256 _auctionId) external onlyAdmin auctionEnded(_auctionId){
+    function bidFinally(uint256 _auctionId) external onlyAdmin {
         Auction storage auction = auctions[_auctionId];
+        
+        require(block.timestamp > auction.startTime + auction.duration, "Auction not end!");
+        // 设置拍卖结束
+        _setAuctionEnd(_auctionId);
         // 赢家 竞拍的方式（ETH或USDC）
         uint256 successBidderBidMethods = bidMethods[_auctionId][auction.highestBidder];
         // 赢家 锁定在合约中的所有 ETH/USDC 数额
@@ -227,6 +243,7 @@ contract MetaNFTAuction is Initializable, IERC721Receiver{
             // 将成交额转给NFT持有者：seller
             (bool success2,) = auction.seller.call{value: auction.highestBid}("");
             require(success2, "Invalid transfer");
+            
         }else{
             // USDC
             require(
@@ -237,11 +254,14 @@ contract MetaNFTAuction is Initializable, IERC721Receiver{
             auction.paymentToken.transferFrom(address(this), auction.highestBidder, rebackAmount);
             // 将成交额转给NFT持有者
             auction.paymentToken.transferFrom(address(this), auction.seller, auction.highestBid);
+
         }
 
+        // 触发拍卖成功事件
+        emit BidFinally(_auctionId, auction.seller, auction.highestBidder, auction.highestBid);
     }
 
-    // 竞拍失败者 调用withdraw函数退款
+    // 竞拍失败者 调用withdraw函数退款，拍卖必须结束
     function withdraw(uint256 auctionId_) external auctionEnded(auctionId_) returns(uint256) {
         Auction storage auction = auctions[auctionId_];
 
@@ -253,10 +273,18 @@ contract MetaNFTAuction is Initializable, IERC721Receiver{
         if (bidMethod == 1) {
             payable(msg.sender).transfer(bal);
         } else {
-            IERC20(address(auction.paymentToken)).transferFrom(address(this), msg.sender, bal);
+            // 这里使用transfer方法 合约从自己的地址转给msg.sender
+            IERC20(address(auction.paymentToken)).transfer(msg.sender, bal);
         }
-        // emit Withdraw(msg.sender, bal);
+        // 触发失败者退款事件
+        emit Withdraw(auctionId, msg.sender, bal);
         return bal;
+    }
+
+    // admin 手动设置拍卖结束
+    function _setAuctionEnd(uint256 auctionId_) internal onlyAdmin auctionNotEnded(auctionId_) {
+        Auction storage auction = auctions[auctionId_];
+        auction.end = true;
     }
 
     // 预言机
@@ -297,6 +325,4 @@ contract MetaNFTAuction is Initializable, IERC721Receiver{
         uint256 usd = (amount * priceWithoutDecimals) / scale;
         return usd;
     }
-
-
 }
